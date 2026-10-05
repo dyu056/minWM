@@ -95,6 +95,20 @@ class Wan21Adapter(ModelAdapter):
             for _ in range(batch_size)
         ]
 
+    def conditioning(self, batch: dict, batch_size: int, device: torch.device) -> dict[str, Any]:
+        cached = batch.get("prompt_context")
+        if cached is not None:
+            if len(cached) != batch_size:
+                raise ValueError(
+                    f"conditioning got {len(cached)} cached contexts for batch_size {batch_size}"
+                )
+            return {
+                "context": [
+                    c.to(device=device, dtype=self.dtype, non_blocking=True) for c in cached
+                ]
+            }
+        return {"context": self.encode_text(batch.get("prompts"), batch_size, device)}
+
     def denoise(
         self,
         model: nn.Module,

@@ -192,7 +192,9 @@ class CameraLatentLMDBDataset(Dataset):
     ``data_path`` may be a single LMDB directory or a sharded parent directory.
     """
 
-    def __init__(self, data_path: str, max_pair: int = int(1e8)):
+    def __init__(
+        self, data_path: str, max_pair: int = int(1e8), prompt_cache_path: str | None = None
+    ):
         self.max_pair = max_pair
         if _is_single_lmdb(data_path):
             self._sharded = False
@@ -213,6 +215,26 @@ class CameraLatentLMDBDataset(Dataset):
                 self._poses_shapes.append(_get_shape(env, "poses"))
                 for j in range(ls[0]):
                     self._index.append((sid, j))
+
+        self.prompt_cache = None
+        if prompt_cache_path is not None:
+            self.prompt_cache = _open(prompt_cache_path)
+            with self.prompt_cache.begin() as txn:
+                cache_meta = txn.get(b"metadata")
+            if cache_meta is None:
+                raise ValueError(f"Prompt cache at {prompt_cache_path} has no metadata")
+            import json
+
+            self._prompt_cache_meta = json.loads(cache_meta.decode())
+            if self._prompt_cache_meta.get("num_samples") != len(self):
+                raise ValueError(
+                    f"Prompt cache has {self._prompt_cache_meta.get('num_samples')} samples, "
+                    f"but dataset has {len(self)}"
+                )
+            if self._prompt_cache_meta.get("format") != "wan21_prompt_context_v1":
+                raise ValueError(
+                    f"Unsupported prompt cache format: {self._prompt_cache_meta.get('format')}"
+                )
 
     def __len__(self) -> int:
         if self._sharded:
@@ -243,9 +265,26 @@ class CameraLatentLMDBDataset(Dataset):
             poses = _get_row(env, "poses", np.float32, idx, shape=self._poses_shape[1:])
 
         viewmats, Ks = _build_viewmats_and_Ks(intrinsics, poses)
-        return {
+        result = {
             "prompts": prompts,
             "clean_latent": torch.tensor(latents, dtype=torch.float32)[-1],
             "viewmats": torch.tensor(viewmats, dtype=torch.float32),
             "Ks": torch.tensor(Ks, dtype=torch.float32),
         }
+        if self.prompt_cache is not None:
+            with self.prompt_cache.begin() as txn:
+                raw = txn.get(f"context_{idx}_data".encode())
+                shape_raw = txn.get(f"context_{idx}_shape".encode())
+                prompt_hash = txn.get(f"prompt_{idx}_sha256".encode())
+            if raw is None or shape_raw is None or prompt_hash is None:
+                raise KeyError(f"Prompt cache is missing sample {idx}")
+            import hashlib
+
+            actual_hash = hashlib.sha256(prompts.encode("utf-8")).hexdigest().encode()
+            if actual_hash != prompt_hash:
+                raise ValueError(f"Prompt cache does not match source prompt at sample {idx}")
+            shape = tuple(map(int, shape_raw.decode().split()))
+            # bfloat16 has no NumPy dtype; preserve its raw 16-bit representation.
+            arr = np.frombuffer(raw, dtype=np.uint16).copy()
+            result["prompt_context"] = torch.from_numpy(arr).view(torch.bfloat16).reshape(shape)
+        return result
