@@ -192,9 +192,7 @@ def export_diffusers(weights: dict[str, torch.Tensor], output_dir: str, config_f
         raise RuntimeError(
             f"{type(model).__name__} has no 'save_pretrained'; diffusers format needs a ModelMixin"
         )
-    missing, unexpected = model.load_state_dict(weights, strict=False)
-    if missing or unexpected:
-        print(f"  note: {len(missing)} missing / {len(unexpected)} unexpected keys vs architecture")
+    model.load_state_dict(weights, strict=True)
     model.save_pretrained(output_dir, safe_serialization=True)
     print(
         f"saved diffusers dir → {output_dir}  (config.json + diffusion_pytorch_model.safetensors)"

@@ -290,11 +290,23 @@ class Checkpointer:
             import torch.distributed.checkpoint as dcp
             from torch.distributed.checkpoint.default_planner import DefaultLoadPlanner
 
-            dcp.load(
-                which,
-                storage_reader=self._dcp_reader(path),
-                planner=DefaultLoadPlanner(allow_partial_load=self.allow_partial_load),
-            )
+            reader = self._dcp_reader(path)
+            metadata = reader.read_metadata()
+            prepared = []
+            try:
+                for name, obj in which.items():
+                    hook = getattr(obj, "prepare_for_load", None)
+                    if hook is not None:
+                        hook(metadata, root_key=name)
+                        prepared.append(hook)
+                dcp.load(
+                    which,
+                    storage_reader=reader,
+                    planner=DefaultLoadPlanner(allow_partial_load=self.allow_partial_load),
+                )
+            finally:
+                for hook in prepared:
+                    hook(None)
         elif fmt == formats.TORCH:
             import torch
 

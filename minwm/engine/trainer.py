@@ -56,6 +56,10 @@ class _TrainerAppState:
 
     def __init__(self, trainer: "BaseTrainer") -> None:
         self.trainer = trainer
+        self._load_metadata = None
+
+    def prepare_for_load(self, metadata, root_key="app") -> None:
+        self._load_metadata = (metadata, root_key) if metadata is not None else None
 
     def state_dict(self) -> dict[str, Any]:
         from torch.distributed.checkpoint.state_dict import (
@@ -69,7 +73,16 @@ class _TrainerAppState:
         for name, net in t.auxiliary_models.items():
             sd[f"aux/{name}"] = get_model_state_dict(net)
         for name, opt in t.optimizers.items():
-            sd[f"opt/{name}"] = get_optimizer_state_dict(t._module_for_optimizer(opt), opt)
+            owner = t._module_for_optimizer(opt)
+            opt_state = get_optimizer_state_dict(owner, opt)
+            if self._load_metadata is not None:
+                from .checkpoint.optimizer_template import optimizer_load_template
+
+                metadata, root_key = self._load_metadata
+                opt_state = optimizer_load_template(
+                    metadata, root_key, f"opt/{name}", opt_state, get_model_state_dict(owner)
+                )
+            sd[f"opt/{name}"] = opt_state
         from minwm.distributed.rng import get_rng_states_tracker
 
         sd["rng"] = get_rng_states_tracker().state_dict()
@@ -116,9 +129,18 @@ class _TrainerAppState:
                     f"optimizer '{name}'. Set checkpoint.allow_partial_resume=True to "
                     f"opt into partial resume."
                 )
+            opt_state = sd[f"opt/{name}"]
+            # PyTorch 2.9's setter indexes every parameter, including inactive ones.
+            # Empty state means legitimately uninitialized, not zeroed momentum.
+            for group in opt_state["param_groups"]:
+                for parameter_name in group["params"]:
+                    opt_state["state"].setdefault(parameter_name, {})
             set_optimizer_state_dict(
-                t._module_for_optimizer(opt), opt, optim_state_dict=sd[f"opt/{name}"]
+                t._module_for_optimizer(opt), opt, optim_state_dict=opt_state
             )
+            for parameter, state in list(opt.state.items()):
+                if not state:
+                    del opt.state[parameter]
         if "rng" in sd and not t.cfg.training.no_load_rng:
             from minwm.distributed.rng import get_rng_states_tracker
 

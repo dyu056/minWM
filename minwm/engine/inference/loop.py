@@ -382,6 +382,7 @@ class ARGenerationLoop:
         # (rather than ``del``) so the ``forward`` closure's captured name stays
         # bound.
         branches = None
+        cache = None  # Last loop iteration otherwise retains one CFG KV cache.
 
         out: dict = {"latents": output}
         if self.vae is not None:
